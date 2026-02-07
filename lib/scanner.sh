@@ -292,8 +292,12 @@ get_category_count() {
             echo "$count"
             ;;
         archives)
-            # Count .xcarchive bundles
-            find "$ARCHIVES_PATH" -name "*.xcarchive" -type d 2>/dev/null | wc -l | tr -d ' '
+            # Count .xcarchive bundles (check if dir exists first)
+            if [[ -d "$ARCHIVES_PATH" ]]; then
+                find "$ARCHIVES_PATH" -name "*.xcarchive" -type d 2>/dev/null | wc -l | tr -d ' '
+            else
+                echo "0"
+            fi
             ;;
         device-support)
             local total=0

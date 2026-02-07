@@ -154,25 +154,34 @@ draw_storage_bar() {
 
 # Read a single keypress
 read_key() {
-    local key key2
+    local key char2 char3
     IFS= read -rsn1 key 2>/dev/null
 
     # Handle escape sequences (arrow keys)
     if [[ "$key" == $'\x1b' ]]; then
-        read -rsn2 -t 0.1 key2 2>/dev/null
-        # If no additional chars read, it's plain escape
-        if [[ -z "$key2" ]]; then
+        # Read the next character with a longer timeout
+        IFS= read -rsn1 -t 0.5 char2 2>/dev/null
+        # If no additional char read, it's plain escape
+        if [[ -z "$char2" ]]; then
             echo "escape"
             return
         fi
-        key="${key}${key2}"
+        # If it's '[', read one more for arrow keys
+        if [[ "$char2" == "[" ]]; then
+            IFS= read -rsn1 -t 0.5 char3 2>/dev/null
+            case "$char3" in
+                A) echo "up"; return ;;
+                B) echo "down"; return ;;
+                C) echo "right"; return ;;
+                D) echo "left"; return ;;
+            esac
+        fi
+        # Unknown escape sequence
+        echo "escape"
+        return
     fi
 
     case "$key" in
-        $'\x1b[A') echo "up" ;;
-        $'\x1b[B') echo "down" ;;
-        $'\x1b[C') echo "right" ;;
-        $'\x1b[D') echo "left" ;;
         $'\x0a'|$'\x0d') echo "enter" ;;
         ' ') echo "space" ;;
         q|Q) echo "quit" ;;
@@ -182,6 +191,8 @@ read_key() {
         d|D) echo "delete" ;;
         j|J) echo "down" ;;
         k|K) echo "up" ;;
+        h|H) echo "left" ;;
+        l|L) echo "right" ;;
         [1-9]) echo "$key" ;;
         *) echo "$key" ;;
     esac
@@ -239,10 +250,10 @@ draw_footer() {
     echo ""
     if [[ -n "$TUI_EXPANDED_CAT" ]]; then
         # Item view controls
-        printf " ${DIM}[j/k]${RESET} Navigate  ${DIM}[space]${RESET} Toggle  ${DIM}[a]${RESET} All  ${DIM}[d]${RESET} Delete  ${DIM}[esc]${RESET} Back  ${DIM}[q]${RESET} Quit"
+        printf " ${DIM}[↑↓/jk]${RESET} Navigate  ${DIM}[space]${RESET} Toggle  ${DIM}[a]${RESET} All  ${DIM}[d]${RESET} Delete  ${DIM}[←/esc]${RESET} Back  ${DIM}[q]${RESET} Quit"
     else
         # Category view controls
-        printf " ${DIM}[1-5]${RESET} Toggle  ${DIM}[enter]${RESET} Expand  ${DIM}[a]${RESET} All  ${DIM}[c]${RESET} Clean  ${DIM}[r]${RESET} Refresh  ${DIM}[q]${RESET} Quit"
+        printf " ${DIM}[↑↓/jk]${RESET} Navigate  ${DIM}[space]${RESET} Toggle  ${DIM}[→/enter]${RESET} Expand  ${DIM}[a]${RESET} All  ${DIM}[c]${RESET} Clean  ${DIM}[q]${RESET} Quit"
     fi
     echo ""
 }
@@ -276,6 +287,7 @@ TUI_CAT_SELECTED=()
 
 # Expanded state and item navigation
 TUI_EXPANDED_CAT=""      # Currently expanded category key (empty = none)
+TUI_CAT_CURSOR=0         # Cursor position in category list
 TUI_ITEM_CURSOR=0        # Cursor position within items
 TUI_SCROLL_OFFSET=0      # Scroll offset for long lists
 TUI_MAX_VISIBLE_ITEMS=8  # Max items to show before scrolling
@@ -304,6 +316,7 @@ tui_clear_categories() {
     TUI_ITEMS_DEVICE_SUPPORT_SELECTED=()
     # Reset navigation
     TUI_EXPANDED_CAT=""
+    TUI_CAT_CURSOR=0
     TUI_ITEM_CURSOR=0
     TUI_SCROLL_OFFSET=0
 }
@@ -770,8 +783,14 @@ draw_category_table_simple() {
             fi
         fi
 
-        printf " ${CYAN}[%d]${RESET} %s %-26s %10s %8s %s\n" \
-            "$((i + 1))" "$expand_indicator" "$name" "$(format_size "$size")" "$count" "$check"
+        # Highlight current cursor position when not in expanded view
+        if [[ -z "$TUI_EXPANDED_CAT" ]] && [[ "$i" == "$TUI_CAT_CURSOR" ]]; then
+            printf " ${REVERSE}${CYAN}[%d]${RESET}${REVERSE} %s %-26s %10s %8s %s${RESET}\n" \
+                "$((i + 1))" "$expand_indicator" "$name" "$(format_size "$size")" "$count" "$check"
+        else
+            printf " ${CYAN}[%d]${RESET} %s %-26s %10s %8s %s\n" \
+                "$((i + 1))" "$expand_indicator" "$name" "$(format_size "$size")" "$count" "$check"
+        fi
 
         # Draw expanded items if this category is expanded
         if [[ "$TUI_EXPANDED_CAT" == "$key" ]]; then
@@ -933,28 +952,39 @@ run_tui() {
             esac
         else
             # Category view
+            local cat_count=${#TUI_CAT_KEYS[@]}
+
             case "$key" in
                 quit)
                     clear_screen
                     show_cursor
                     exit 0
                     ;;
+                up)
+                    # Navigate up in categories
+                    if [[ "$TUI_CAT_CURSOR" -gt 0 ]]; then
+                        ((TUI_CAT_CURSOR--))
+                    fi
+                    ;;
+                down)
+                    # Navigate down in categories
+                    if [[ "$TUI_CAT_CURSOR" -lt $((cat_count - 1)) ]]; then
+                        ((TUI_CAT_CURSOR++))
+                    fi
+                    ;;
                 refresh)
                     tui_refresh_with_spinner "Refreshing..."
                     ;;
                 enter|right)
-                    # Try to expand the first expandable selected category, or first expandable if none selected
-                    local i found=0
-                    for ((i=0; i<${#TUI_CAT_KEYS[@]}; i++)); do
-                        local cat_key="${TUI_CAT_KEYS[$i]}"
-                        if tui_is_expandable "$cat_key"; then
-                            if [[ "${TUI_CAT_SELECTED[$i]}" == "1" ]] || [[ "$found" == "0" ]]; then
-                                tui_toggle_expand "$cat_key"
-                                found=1
-                                break
-                            fi
-                        fi
-                    done
+                    # Expand the currently highlighted category if expandable
+                    local cat_key="${TUI_CAT_KEYS[$TUI_CAT_CURSOR]}"
+                    if tui_is_expandable "$cat_key"; then
+                        tui_toggle_expand "$cat_key"
+                    fi
+                    ;;
+                space)
+                    # Toggle selection of current category
+                    tui_toggle_category "$TUI_CAT_CURSOR"
                     ;;
                 all)
                     # Toggle all categories
@@ -991,7 +1021,7 @@ run_tui() {
 
                     if [[ "${#selected_cats[@]}" -eq 0 ]]; then
                         echo ""
-                        echo "${YELLOW}No categories selected. Use [1-5] or [a] to select.${RESET}"
+                        echo "${YELLOW}No categories selected. Use [space] or [a] to select.${RESET}"
                         sleep 1.5
                         continue
                     fi
@@ -1018,21 +1048,12 @@ run_tui() {
                     fi
                     ;;
                 [1-5])
-                    # Toggle specific category selection
+                    # Toggle specific category selection and move cursor there
                     local idx=$((key - 1))
                     if [[ $idx -lt ${#TUI_CAT_KEYS[@]} ]]; then
+                        TUI_CAT_CURSOR=$idx
                         tui_toggle_category "$idx"
                     fi
-                    ;;
-                space)
-                    # In category view with number keys, space can toggle the first selected or first category
-                    local i
-                    for ((i=0; i<${#TUI_CAT_KEYS[@]}; i++)); do
-                        if [[ "${TUI_CAT_SELECTED[$i]}" == "1" ]]; then
-                            tui_toggle_category "$i"
-                            break
-                        fi
-                    done
                     ;;
             esac
         fi
