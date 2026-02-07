@@ -13,6 +13,7 @@ setup_colors() {
         MAGENTA=""
         BOLD=""
         DIM=""
+        REVERSE=""
         RESET=""
         return
     fi
@@ -27,6 +28,7 @@ setup_colors() {
         MAGENTA=""
         BOLD=""
         DIM=""
+        REVERSE=""
         RESET=""
         return
     fi
@@ -41,6 +43,7 @@ setup_colors() {
         CYAN=$(tput setaf 6)
         BOLD=$(tput bold)
         DIM=$(tput dim 2>/dev/null || echo "")
+        REVERSE=$(tput rev 2>/dev/null || echo "")
         RESET=$(tput sgr0)
     else
         # Fallback to ANSI escape codes
@@ -52,6 +55,7 @@ setup_colors() {
         CYAN=$'\033[0;36m'
         BOLD=$'\033[1m'
         DIM=$'\033[2m'
+        REVERSE=$'\033[7m'
         RESET=$'\033[0m'
     fi
 }

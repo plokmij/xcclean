@@ -229,6 +229,28 @@ clean_caches() {
     log "Freed $(format_size "$deleted_size")"
 }
 
+# Clean selected items (reads paths from stdin, one per line)
+clean_selected_items() {
+    local deleted_count=0
+    local deleted_size=0
+
+    while IFS= read -r path; do
+        [[ -z "$path" ]] && continue
+
+        local size
+        size=$(get_dir_size_bytes "$path")
+
+        if safe_delete "$path"; then
+            ((deleted_count++))
+            deleted_size=$((deleted_size + size))
+            log "  ${GREEN}✓${RESET} Deleted: $(basename "$path") ($(format_size "$size"))"
+        fi
+    done
+
+    log ""
+    log "Deleted $deleted_count items, freed $(format_size "$deleted_size")"
+}
+
 # Clean all categories
 clean_all() {
     local older_than="${1:-0}"
