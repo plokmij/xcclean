@@ -798,6 +798,21 @@ tui_refresh_data() {
     done <<< "$scan_output"
 }
 
+# Refresh with animated spinner
+tui_refresh_with_spinner() {
+    local message="${1:-Scanning...}"
+
+    # Run refresh in background
+    tui_refresh_data &
+    local pid=$!
+
+    # Show spinner while running
+    spinner "$pid" "$message"
+
+    # Wait for completion
+    wait "$pid"
+}
+
 # Delete selected items in the expanded category
 tui_delete_selected_items() {
     local count
@@ -850,8 +865,7 @@ run_tui() {
     get_term_size
 
     # Initial scan
-    echo "Scanning..."
-    tui_refresh_data
+    tui_refresh_with_spinner "Scanning..."
 
     # Main loop
     while true; do
@@ -907,10 +921,8 @@ run_tui() {
                     tui_delete_selected_items
                     ;;
                 refresh)
-                    echo ""
-                    echo "Refreshing..."
                     local expanded_cat="$TUI_EXPANDED_CAT"
-                    tui_refresh_data
+                    tui_refresh_with_spinner "Refreshing..."
                     if [[ -n "$expanded_cat" ]]; then
                         tui_load_category_items "$expanded_cat"
                         TUI_EXPANDED_CAT="$expanded_cat"
@@ -928,9 +940,7 @@ run_tui() {
                     exit 0
                     ;;
                 refresh)
-                    echo ""
-                    echo "Refreshing..."
-                    tui_refresh_data
+                    tui_refresh_with_spinner "Refreshing..."
                     ;;
                 enter|right)
                     # Try to expand the first expandable selected category, or first expandable if none selected
