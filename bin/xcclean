@@ -1,0 +1,564 @@
+#!/bin/bash
+# xcclean - Xcode Storage Cleaner CLI
+# https://github.com/your-username/xcclean
+
+set -euo pipefail
+
+# Determine script directory and load libraries
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB_DIR="${SCRIPT_DIR}/../lib"
+
+# Check if running from installed location or development
+if [[ -f "${LIB_DIR}/core.sh" ]]; then
+    source "${LIB_DIR}/colors.sh"
+    source "${LIB_DIR}/core.sh"
+    source "${LIB_DIR}/scanner.sh"
+    source "${LIB_DIR}/cleaner.sh"
+    source "${LIB_DIR}/tui.sh"
+elif [[ -f "/usr/local/lib/xcclean/core.sh" ]]; then
+    source "/usr/local/lib/xcclean/colors.sh"
+    source "/usr/local/lib/xcclean/core.sh"
+    source "/usr/local/lib/xcclean/scanner.sh"
+    source "/usr/local/lib/xcclean/cleaner.sh"
+    source "/usr/local/lib/xcclean/tui.sh"
+else
+    echo "Error: Cannot find xcclean library files" >&2
+    exit 1
+fi
+
+# Global options
+XCCLEAN_DRY_RUN=0
+XCCLEAN_YES=0
+XCCLEAN_QUIET=0
+XCCLEAN_JSON=0
+XCCLEAN_TRASH=0
+XCCLEAN_NO_COLOR=0
+XCCLEAN_VERBOSE=0
+OLDER_THAN=0
+KEEP_LATEST=0
+FILTER_PROJECT=""
+
+# Export for use in subshells
+export XCCLEAN_DRY_RUN XCCLEAN_YES XCCLEAN_QUIET XCCLEAN_JSON
+export XCCLEAN_TRASH XCCLEAN_NO_COLOR XCCLEAN_VERBOSE
+
+# Show version
+show_version() {
+    echo "xcclean version ${XCCLEAN_VERSION}"
+}
+
+# Show help
+show_help() {
+    cat << 'EOF'
+xcclean - Xcode Storage Cleaner CLI
+
+USAGE:
+    xcclean [COMMAND] [OPTIONS]
+
+COMMANDS:
+    (none)          Interactive TUI mode
+    status          Show storage overview
+    scan            Scan and show all cleanable paths
+    clean           Clean specified category
+    list            List items in category
+
+CATEGORIES (for clean/list):
+    derived         Xcode DerivedData
+    archives        Xcode Archives
+    device-support  iOS/watchOS/tvOS Device Support
+    simulators      Unavailable Simulator devices
+    caches          Xcode and build caches
+    all             All categories
+
+OPTIONS:
+    -n, --dry-run           Preview without deleting
+    -y, --yes               Skip confirmation prompts
+    -q, --quiet             Minimal output (for scripts)
+    -v, --verbose           Verbose output
+    --no-color              Disable colored output
+    --json                  Output in JSON format
+    --trash                 Move to Trash instead of permanent delete
+    --older-than <days>     Only items older than N days
+    --keep-latest <n>       Keep N most recent items
+    --project <name>        Filter by project name
+    -h, --help              Show this help message
+    --version               Show version
+
+EXAMPLES:
+    xcclean                                    # Interactive mode
+    xcclean status                             # Show disk usage
+    xcclean scan                               # List all cleanable items
+    xcclean clean derived --dry-run            # Preview derived data cleanup
+    xcclean clean all --older-than 30 --yes    # Clean old items automatically
+    xcclean list archives --json               # List archives as JSON
+    xcclean clean device-support --keep-latest 3
+
+SAFETY:
+    - Uses --dry-run to preview changes before deleting
+    - Uses --trash to move to Trash instead of permanent delete
+    - Warns if Xcode is currently running
+    - Only deletes from known Xcode cache directories
+EOF
+}
+
+# Parse command line arguments
+parse_args() {
+    COMMAND=""
+    CATEGORY=""
+    POSITIONAL=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            --version)
+                show_version
+                exit 0
+                ;;
+            -n|--dry-run)
+                XCCLEAN_DRY_RUN=1
+                shift
+                ;;
+            -y|--yes)
+                XCCLEAN_YES=1
+                shift
+                ;;
+            -q|--quiet)
+                XCCLEAN_QUIET=1
+                shift
+                ;;
+            -v|--verbose)
+                XCCLEAN_VERBOSE=1
+                shift
+                ;;
+            --no-color)
+                XCCLEAN_NO_COLOR=1
+                setup_colors  # Re-setup with no colors
+                shift
+                ;;
+            --json)
+                XCCLEAN_JSON=1
+                XCCLEAN_NO_COLOR=1
+                setup_colors
+                shift
+                ;;
+            --trash)
+                XCCLEAN_TRASH=1
+                shift
+                ;;
+            --older-than)
+                OLDER_THAN="${2:-0}"
+                shift 2
+                ;;
+            --keep-latest)
+                KEEP_LATEST="${2:-0}"
+                shift 2
+                ;;
+            --project)
+                FILTER_PROJECT="${2:-}"
+                shift 2
+                ;;
+            -*)
+                print_error "Unknown option: $1"
+                echo "Run 'xcclean --help' for usage."
+                exit 1
+                ;;
+            *)
+                POSITIONAL+=("$1")
+                shift
+                ;;
+        esac
+    done
+
+    # Extract command and category from positional args
+    if [[ ${#POSITIONAL[@]} -ge 1 ]]; then
+        COMMAND="${POSITIONAL[0]}"
+    fi
+    if [[ ${#POSITIONAL[@]} -ge 2 ]]; then
+        CATEGORY="${POSITIONAL[1]}"
+    fi
+}
+
+# Show storage status
+cmd_status() {
+    local total used available percentage
+
+    total=$(get_disk_total)
+    used=$(get_disk_used)
+    available=$(get_disk_available)
+    percentage=$((used * 100 / total))
+
+    if [[ "$XCCLEAN_JSON" == "1" ]]; then
+        cat << EOF
+{
+  "disk": {
+    "total": $total,
+    "used": $used,
+    "available": $available,
+    "percentage": $percentage
+  }
+}
+EOF
+    else
+        echo ""
+        echo "${BOLD}Mac Storage Overview${RESET}"
+        echo ""
+        printf "  Total:     %s\n" "$(format_size "$total")"
+        printf "  Used:      %s (%d%%)\n" "$(format_size "$used")" "$percentage"
+        printf "  Available: %s\n" "$(format_size "$available")"
+        echo ""
+        printf " "
+        draw_storage_bar "$used" "$total" 50
+        echo ""
+        echo ""
+    fi
+}
+
+# Scan all categories
+cmd_scan() {
+    if [[ "$XCCLEAN_JSON" == "1" ]]; then
+        echo "{"
+        echo '  "categories": ['
+
+        local first=1
+        local total_size=0
+
+        while IFS='|' read -r key name size count; do
+            [[ -z "$key" ]] && continue
+            if [[ "$key" == "total" ]]; then
+                total_size=$size
+                continue
+            fi
+
+            [[ "$first" == "1" ]] || echo ","
+            first=0
+
+            printf '    {"id": "%s", "name": "%s", "size": %s, "count": "%s"}' \
+                "$key" "$name" "${size:-0}" "$count"
+        done < <(scan_all)
+
+        echo ""
+        echo "  ],"
+        echo "  \"total_size\": $total_size"
+        echo "}"
+    else
+        echo ""
+        echo "${BOLD}Xcode Cleanable Items${RESET}"
+        echo ""
+        printf "  ${BOLD}%-25s %12s %10s${RESET}\n" "Category" "Size" "Items"
+        printf "  %s\n" "$(printf '%48s' '' | tr ' ' '-')"
+
+        local total_size=0
+
+        while IFS='|' read -r key name size count; do
+            if [[ "$key" == "total" ]]; then
+                total_size=$size
+                continue
+            fi
+
+            printf "  %-25s %12s %10s\n" "$name" "$(format_size "$size")" "$count"
+        done < <(scan_all)
+
+        printf "  %s\n" "$(printf '%48s' '' | tr ' ' '-')"
+        printf "  ${BOLD}%-25s %12s${RESET}\n" "Total Cleanable" "$(format_size "$total_size")"
+        echo ""
+    fi
+}
+
+# List items in a category
+cmd_list() {
+    local category="${1:-}"
+
+    if [[ -z "$category" ]]; then
+        print_error "Category required. Use: derived, archives, device-support, simulators, caches"
+        exit 1
+    fi
+
+    case "$category" in
+        derived)
+            list_derived_data
+            ;;
+        archives)
+            list_archives
+            ;;
+        device-support)
+            list_device_support
+            ;;
+        simulators)
+            list_simulators
+            ;;
+        caches)
+            list_caches
+            ;;
+        *)
+            print_error "Unknown category: $category"
+            echo "Valid categories: derived, archives, device-support, simulators, caches"
+            exit 1
+            ;;
+    esac
+}
+
+list_derived_data() {
+    if [[ "$XCCLEAN_JSON" == "1" ]]; then
+        echo '{"items": ['
+        local first=1
+
+        while IFS='|' read -r name size path age; do
+            [[ -z "$path" ]] && continue
+            [[ "$first" == "1" ]] || echo ","
+            first=0
+            printf '  {"name": "%s", "size": %s, "path": "%s", "age_days": %s}' \
+                "$name" "$size" "$path" "$age"
+        done < <(scan_derived_data "$FILTER_PROJECT" "$OLDER_THAN")
+
+        echo ""
+        echo "]}"
+    else
+        echo ""
+        echo "${BOLD}Derived Data${RESET}"
+        echo ""
+        printf "  ${BOLD}%-30s %12s %10s${RESET}\n" "Project" "Size" "Age"
+        printf "  %s\n" "$(printf '%54s' '' | tr ' ' '-')"
+
+        while IFS='|' read -r name size path age; do
+            [[ -z "$path" ]] && continue
+            printf "  %-30s %12s %8s d\n" "${name:0:30}" "$(format_size "$size")" "$age"
+        done < <(scan_derived_data "$FILTER_PROJECT" "$OLDER_THAN")
+
+        echo ""
+    fi
+}
+
+list_archives() {
+    if [[ "$XCCLEAN_JSON" == "1" ]]; then
+        echo '{"items": ['
+        local first=1
+
+        while IFS='|' read -r name size path age date; do
+            [[ -z "$path" ]] && continue
+            [[ "$first" == "1" ]] || echo ","
+            first=0
+            printf '  {"name": "%s", "size": %s, "path": "%s", "age_days": %s, "date": "%s"}' \
+                "$name" "$size" "$path" "$age" "$date"
+        done < <(scan_archives "$FILTER_PROJECT" "$OLDER_THAN")
+
+        echo ""
+        echo "]}"
+    else
+        echo ""
+        echo "${BOLD}Archives${RESET}"
+        echo ""
+        printf "  ${BOLD}%-25s %12s %12s${RESET}\n" "Project" "Size" "Date"
+        printf "  %s\n" "$(printf '%51s' '' | tr ' ' '-')"
+
+        while IFS='|' read -r name size path age date; do
+            [[ -z "$path" ]] && continue
+            printf "  %-25s %12s %12s\n" "${name:0:25}" "$(format_size "$size")" "$date"
+        done < <(scan_archives "$FILTER_PROJECT" "$OLDER_THAN")
+
+        echo ""
+    fi
+}
+
+list_device_support() {
+    if [[ "$XCCLEAN_JSON" == "1" ]]; then
+        echo '{"items": ['
+        local first=1
+
+        while IFS='|' read -r platform version size path age; do
+            [[ -z "$path" ]] && continue
+            [[ "$first" == "1" ]] || echo ","
+            first=0
+            printf '  {"platform": "%s", "version": "%s", "size": %s, "path": "%s", "age_days": %s}' \
+                "$platform" "$version" "$size" "$path" "$age"
+        done < <(scan_device_support "" "$KEEP_LATEST")
+
+        echo ""
+        echo "]}"
+    else
+        echo ""
+        echo "${BOLD}Device Support${RESET}"
+        echo ""
+        printf "  ${BOLD}%-10s %-25s %12s${RESET}\n" "Platform" "Version" "Size"
+        printf "  %s\n" "$(printf '%49s' '' | tr ' ' '-')"
+
+        while IFS='|' read -r platform version size path age; do
+            [[ -z "$path" ]] && continue
+            printf "  %-10s %-25s %12s\n" "$platform" "${version:0:25}" "$(format_size "$size")"
+        done < <(scan_device_support "" "$KEEP_LATEST")
+
+        echo ""
+    fi
+}
+
+list_simulators() {
+    if [[ "$XCCLEAN_JSON" == "1" ]]; then
+        echo '{"items": ['
+        local first=1
+
+        while IFS='|' read -r name udid state os size path; do
+            [[ -z "$udid" ]] && continue
+            [[ "$first" == "1" ]] || echo ","
+            first=0
+            printf '  {"name": "%s", "udid": "%s", "state": "%s", "os": "%s"}' \
+                "$name" "$udid" "$state" "$os"
+        done < <(scan_simulators)
+
+        echo ""
+        echo "]}"
+    else
+        echo ""
+        echo "${BOLD}Unavailable Simulators${RESET}"
+        echo ""
+        printf "  ${BOLD}%-25s %-20s${RESET}\n" "Device" "OS"
+        printf "  %s\n" "$(printf '%47s' '' | tr ' ' '-')"
+
+        while IFS='|' read -r name udid state os size path; do
+            [[ -z "$udid" ]] && continue
+            printf "  %-25s %-20s\n" "${name:0:25}" "${os:0:20}"
+        done < <(scan_simulators)
+
+        echo ""
+    fi
+}
+
+list_caches() {
+    if [[ "$XCCLEAN_JSON" == "1" ]]; then
+        echo '{"items": ['
+        local first=1
+
+        for cache_path in "${CACHE_PATHS[@]}"; do
+            if [[ -d "$cache_path" ]]; then
+                local name size
+                name=$(basename "$cache_path")
+                size=$(get_dir_size_bytes "$cache_path")
+
+                [[ "$first" == "1" ]] || echo ","
+                first=0
+                printf '  {"name": "%s", "size": %s, "path": "%s"}' "$name" "$size" "$cache_path"
+            fi
+        done
+
+        echo ""
+        echo "]}"
+    else
+        echo ""
+        echo "${BOLD}Caches${RESET}"
+        echo ""
+        printf "  ${BOLD}%-35s %12s${RESET}\n" "Cache" "Size"
+        printf "  %s\n" "$(printf '%49s' '' | tr ' ' '-')"
+
+        for cache_path in "${CACHE_PATHS[@]}"; do
+            if [[ -d "$cache_path" ]]; then
+                local name size
+                name=$(basename "$cache_path")
+                size=$(get_dir_size_bytes "$cache_path")
+                printf "  %-35s %12s\n" "$name" "$(format_size "$size")"
+            fi
+        done
+
+        echo ""
+    fi
+}
+
+# Clean command
+cmd_clean() {
+    local category="${1:-}"
+
+    if [[ -z "$category" ]]; then
+        print_error "Category required. Use: derived, archives, device-support, simulators, caches, all"
+        exit 1
+    fi
+
+    # Calculate size to be cleaned
+    local size_to_clean
+    size_to_clean=$(get_category_size "$category")
+
+    if [[ "$size_to_clean" -eq 0 ]] && [[ "$category" != "all" ]]; then
+        log "Nothing to clean in $category."
+        exit 0
+    fi
+
+    # Confirmation
+    if [[ "$XCCLEAN_YES" != "1" ]] && [[ "$XCCLEAN_DRY_RUN" != "1" ]]; then
+        echo ""
+        if [[ "$category" == "all" ]]; then
+            local total=0
+            for cat in derived archives device-support simulators caches; do
+                total=$((total + $(get_category_size "$cat")))
+            done
+            size_to_clean=$total
+        fi
+
+        if ! confirm "Clean $category? This will free approximately $(format_size "$size_to_clean")."; then
+            echo "Cancelled."
+            exit 0
+        fi
+    fi
+
+    echo ""
+
+    case "$category" in
+        derived)
+            clean_derived_data "$FILTER_PROJECT" "$OLDER_THAN"
+            ;;
+        archives)
+            clean_archives "$FILTER_PROJECT" "$OLDER_THAN" "$KEEP_LATEST"
+            ;;
+        device-support)
+            clean_device_support "" "$KEEP_LATEST"
+            ;;
+        simulators)
+            clean_simulators
+            ;;
+        caches)
+            clean_caches
+            ;;
+        all)
+            clean_all "$OLDER_THAN" "$KEEP_LATEST"
+            ;;
+        *)
+            print_error "Unknown category: $category"
+            echo "Valid categories: derived, archives, device-support, simulators, caches, all"
+            exit 1
+            ;;
+    esac
+}
+
+# Main entry point
+main() {
+    parse_args "$@"
+
+    case "${COMMAND:-}" in
+        "")
+            # Interactive TUI mode
+            if [[ ! -t 0 ]] || [[ ! -t 1 ]]; then
+                print_error "Interactive mode requires a terminal. Use 'xcclean scan' or 'xcclean clean <category>'."
+                exit 1
+            fi
+            run_tui
+            ;;
+        status)
+            cmd_status
+            ;;
+        scan)
+            cmd_scan
+            ;;
+        list)
+            cmd_list "$CATEGORY"
+            ;;
+        clean)
+            cmd_clean "$CATEGORY"
+            ;;
+        *)
+            print_error "Unknown command: $COMMAND"
+            echo "Run 'xcclean --help' for usage."
+            exit 1
+            ;;
+    esac
+}
+
+# Run
+main "$@"
