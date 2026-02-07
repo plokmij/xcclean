@@ -820,9 +820,10 @@ tui_refresh_data() {
 # Refresh with animated spinner
 tui_refresh_with_spinner() {
     local message="${1:-Scanning...}"
+    local tmpfile="/tmp/xcclean_scan_$$"
 
-    # Run refresh in background
-    tui_refresh_data &
+    # Run scan_all in background and save to temp file
+    scan_all > "$tmpfile" &
     local pid=$!
 
     # Show spinner while running
@@ -830,6 +831,17 @@ tui_refresh_with_spinner() {
 
     # Wait for completion
     wait "$pid"
+
+    # Now parse the results in the foreground (so variables persist)
+    tui_clear_categories
+    while IFS='|' read -r key name size count; do
+        [[ "$key" == "total" ]] && continue
+        [[ -z "$key" ]] && continue
+        tui_add_category "$key" "$name" "$size" "$count"
+    done < "$tmpfile"
+
+    # Cleanup
+    rm -f "$tmpfile"
 }
 
 # Delete selected items in the expanded category
