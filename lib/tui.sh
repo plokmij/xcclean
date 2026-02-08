@@ -15,6 +15,9 @@ BULLET=""
 PROGRESS_FULL=""
 PROGRESS_EMPTY=""
 
+# Clear to end of line sequence
+CLEAR_EOL=$'\033[K'
+
 # Setup characters based on terminal capabilities
 setup_chars() {
     # Check if terminal supports UTF-8
@@ -150,6 +153,7 @@ draw_storage_bar() {
     for ((i=0; i<filled; i++)); do printf '%s' "$PROGRESS_FULL"; done
     printf '%s' "$RESET"
     for ((i=0; i<empty; i++)); do printf '%s' "$PROGRESS_EMPTY"; done
+    printf '%s' "${CLEAR_EOL}"
 }
 
 # Read a single keypress
@@ -159,8 +163,8 @@ read_key() {
 
     # Handle escape sequences (arrow keys)
     if [[ "$key" == $'\x1b' ]]; then
-        # Read the next character with a longer timeout
-        IFS= read -rsn1 -t 0.5 char2 2>/dev/null
+        # Read the next character with a short timeout (bytes are already in buffer)
+        IFS= read -rsn1 -t 0.01 char2 2>/dev/null
         # If no additional char read, it's plain escape
         if [[ -z "$char2" ]]; then
             echo "escape"
@@ -168,7 +172,7 @@ read_key() {
         fi
         # If it's '[', read one more for arrow keys
         if [[ "$char2" == "[" ]]; then
-            IFS= read -rsn1 -t 0.5 char3 2>/dev/null
+            IFS= read -rsn1 -t 0.01 char3 2>/dev/null
             case "$char3" in
                 A) echo "up"; return ;;
                 B) echo "down"; return ;;
@@ -218,44 +222,46 @@ spinner() {
     show_cursor
 }
 
+# Cache disk stats (only call on startup and refresh)
+tui_cache_disk_stats() {
+    TUI_CACHED_DISK_TOTAL=$(get_disk_total)
+    TUI_CACHED_DISK_USED=$(get_disk_used)
+    TUI_CACHED_DISK_AVAILABLE=$(get_disk_available)
+}
+
 # Draw the main TUI header
 draw_header() {
     local width="${1:-60}"
 
-    echo ""
-    echo "${BOLD}${BOX_TL}$(draw_hline $((width - 2)))${BOX_TR}${RESET}"
-    printf "${BOLD}${BOX_V}%*s${BOX_V}${RESET}\n" "$((width - 2))" "xcclean v${XCCLEAN_VERSION}"
-    echo "${BOLD}${BOX_BL}$(draw_hline $((width - 2)))${BOX_BR}${RESET}"
-    echo ""
+    printf '%s\n' "${CLEAR_EOL}"
+    printf '%s%s%s%s%s%s\n' "${BOLD}" "${BOX_TL}" "$(draw_hline $((width - 2)))" "${BOX_TR}" "${RESET}" "${CLEAR_EOL}"
+    printf "${BOLD}${BOX_V}%*s${BOX_V}${RESET}%s\n" "$((width - 2))" "xcclean v${XCCLEAN_VERSION}" "${CLEAR_EOL}"
+    printf '%s%s%s%s%s%s\n' "${BOLD}" "${BOX_BL}" "$(draw_hline $((width - 2)))" "${BOX_BR}" "${RESET}" "${CLEAR_EOL}"
+    printf '%s\n' "${CLEAR_EOL}"
 }
 
-# Draw storage overview
+# Draw storage overview (uses cached disk stats)
 draw_storage_overview() {
-    local total used available
-
-    total=$(get_disk_total)
-    used=$(get_disk_used)
-    available=$(get_disk_available)
+    local total=$TUI_CACHED_DISK_TOTAL
+    local used=$TUI_CACHED_DISK_USED
 
     local percentage=$((used * 100 / total))
 
-    printf " ${BOLD}Mac Storage:${RESET} $(format_size "$used") / $(format_size "$total") (%d%%)\n" "$percentage"
+    printf " ${BOLD}Mac Storage:${RESET} $(format_size "$used") / $(format_size "$total") (%d%%)%s\n" "$percentage" "${CLEAR_EOL}"
     draw_storage_bar "$used" "$total" 50
-    echo ""
-    echo ""
+    printf '\n%s\n%s\n' "${CLEAR_EOL}" "${CLEAR_EOL}"
 }
 
 # Draw footer with controls
 draw_footer() {
-    echo ""
+    printf '%s\n' "${CLEAR_EOL}"
     if [[ -n "$TUI_EXPANDED_CAT" ]]; then
         # Item view controls
-        printf " ${DIM}[↑↓/jk]${RESET} Navigate  ${DIM}[space]${RESET} Toggle  ${DIM}[a]${RESET} All  ${DIM}[d]${RESET} Delete  ${DIM}[←/esc]${RESET} Back  ${DIM}[q]${RESET} Quit"
+        printf " ${DIM}[↑↓/jk]${RESET} Navigate  ${DIM}[space]${RESET} Toggle  ${DIM}[a]${RESET} All  ${DIM}[d]${RESET} Delete  ${DIM}[←/esc]${RESET} Back  ${DIM}[q]${RESET} Quit%s\n" "${CLEAR_EOL}"
     else
         # Category view controls
-        printf " ${DIM}[↑↓/jk]${RESET} Navigate  ${DIM}[space]${RESET} Toggle  ${DIM}[→/enter]${RESET} Expand  ${DIM}[a]${RESET} All  ${DIM}[c]${RESET} Clean  ${DIM}[q]${RESET} Quit"
+        printf " ${DIM}[↑↓/jk]${RESET} Navigate  ${DIM}[space]${RESET} Toggle  ${DIM}[→/enter]${RESET} Expand  ${DIM}[a]${RESET} All  ${DIM}[c]${RESET} Clean  ${DIM}[q]${RESET} Quit%s\n" "${CLEAR_EOL}"
     fi
-    echo ""
 }
 
 # Confirmation dialog
@@ -291,6 +297,11 @@ TUI_CAT_CURSOR=0         # Cursor position in category list
 TUI_ITEM_CURSOR=0        # Cursor position within items
 TUI_SCROLL_OFFSET=0      # Scroll offset for long lists
 TUI_MAX_VISIBLE_ITEMS=8  # Max items to show before scrolling
+
+# Cached disk stats (refreshed only on startup and 'r' key)
+TUI_CACHED_DISK_TOTAL=0
+TUI_CACHED_DISK_USED=0
+TUI_CACHED_DISK_AVAILABLE=0
 
 # Item storage arrays (display_name|size_bytes|path format)
 TUI_ITEMS_DERIVED=()
@@ -658,7 +669,7 @@ draw_expanded_items() {
     esac
 
     if [[ "$item_count" -eq 0 ]]; then
-        printf "     ${DIM}(no items)${RESET}\n"
+        printf "     ${DIM}(no items)${RESET}%s\n" "${CLEAR_EOL}"
         return
     fi
 
@@ -683,7 +694,7 @@ draw_expanded_items() {
 
     # Show "N more above" indicator
     if [[ "$start" -gt 0 ]]; then
-        printf "     ${DIM}... (%d more above)${RESET}\n" "$start"
+        printf "     ${DIM}... (%d more above)${RESET}%s\n" "$start" "${CLEAR_EOL}"
     fi
 
     # Draw items
@@ -721,16 +732,16 @@ draw_expanded_items() {
 
         # Highlight current cursor position
         if [[ "$i" == "$TUI_ITEM_CURSOR" ]]; then
-            printf " ${REVERSE}    %s %-28s %10s${RESET}\n" "$check" "$name" "$(format_size "$size_bytes")"
+            printf " ${REVERSE}    %s %-28s %10s${RESET}%s\n" "$check" "$name" "$(format_size "$size_bytes")" "${CLEAR_EOL}"
         else
-            printf "     %s %-28s %10s\n" "$check" "$name" "$(format_size "$size_bytes")"
+            printf "     %s %-28s %10s%s\n" "$check" "$name" "$(format_size "$size_bytes")" "${CLEAR_EOL}"
         fi
     done
 
     # Show "N more below" indicator
     local remaining=$((item_count - end))
     if [[ "$remaining" -gt 0 ]]; then
-        printf "     ${DIM}... (%d more below)${RESET}\n" "$remaining"
+        printf "     ${DIM}... (%d more below)${RESET}%s\n" "$remaining" "${CLEAR_EOL}"
     fi
 
     # Show delete prompt if items are selected
@@ -739,11 +750,12 @@ draw_expanded_items() {
     if [[ "$selected_count" -gt 0 ]]; then
         local selected_size
         selected_size=$(tui_get_selected_size)
-        echo ""
-        printf "     ${YELLOW}[d]${RESET} Delete Selected (%d item%s, %s)\n" \
+        printf '%s\n' "${CLEAR_EOL}"
+        printf "     ${YELLOW}[d]${RESET} Delete Selected (%d item%s, %s)%s\n" \
             "$selected_count" \
             "$( [[ "$selected_count" -ne 1 ]] && echo "s" )" \
-            "$(format_size "$selected_size")"
+            "$(format_size "$selected_size")" \
+            "${CLEAR_EOL}"
     fi
 }
 
@@ -751,8 +763,8 @@ draw_expanded_items() {
 draw_category_table_simple() {
     local width="${1:-60}"
 
-    printf " ${BOLD}%-3s   %-26s %10s %8s %5s${RESET}\n" "#" "Category" "Size" "Items" ""
-    printf " %s\n" "$(draw_hline $((width - 2)))"
+    printf " ${BOLD}%-3s   %-26s %10s %8s %5s${RESET}%s\n" "#" "Category" "Size" "Items" "" "${CLEAR_EOL}"
+    printf " %s%s\n" "$(draw_hline $((width - 2)))" "${CLEAR_EOL}"
 
     local i
     local total_size=0
@@ -785,11 +797,11 @@ draw_category_table_simple() {
 
         # Highlight current cursor position when not in expanded view
         if [[ -z "$TUI_EXPANDED_CAT" ]] && [[ "$i" == "$TUI_CAT_CURSOR" ]]; then
-            printf " ${REVERSE}${CYAN}[%d]${RESET}${REVERSE} %s %-26s %10s %8s %s${RESET}\n" \
-                "$((i + 1))" "$expand_indicator" "$name" "$(format_size "$size")" "$count" "$check"
+            printf " ${REVERSE}${CYAN}[%d]${RESET}${REVERSE} %s %-26s %10s %8s %s${RESET}%s\n" \
+                "$((i + 1))" "$expand_indicator" "$name" "$(format_size "$size")" "$count" "$check" "${CLEAR_EOL}"
         else
-            printf " ${CYAN}[%d]${RESET} %s %-26s %10s %8s %s\n" \
-                "$((i + 1))" "$expand_indicator" "$name" "$(format_size "$size")" "$count" "$check"
+            printf " ${CYAN}[%d]${RESET} %s %-26s %10s %8s %s%s\n" \
+                "$((i + 1))" "$expand_indicator" "$name" "$(format_size "$size")" "$count" "$check" "${CLEAR_EOL}"
         fi
 
         # Draw expanded items if this category is expanded
@@ -798,9 +810,9 @@ draw_category_table_simple() {
         fi
     done
 
-    printf " %s\n" "$(draw_hline $((width - 2)))"
-    printf " ${BOLD}%-34s %10s${RESET}\n" "Total Cleanable:" "$(format_size "$total_size")"
-    echo ""
+    printf " %s%s\n" "$(draw_hline $((width - 2)))" "${CLEAR_EOL}"
+    printf " ${BOLD}%-34s %10s${RESET}%s\n" "Total Cleanable:" "$(format_size "$total_size")" "${CLEAR_EOL}"
+    printf '%s\n' "${CLEAR_EOL}"
 }
 
 # Refresh TUI data
@@ -895,12 +907,19 @@ run_tui() {
     setup_chars
     get_term_size
 
+    # Cache disk stats once at startup
+    tui_cache_disk_stats
+
     # Initial scan
     tui_refresh_with_spinner "Scanning..."
 
+    # Clear screen once before entering the loop
+    clear_screen
+
     # Main loop
     while true; do
-        clear_screen
+        # Move cursor to home instead of clearing (prevents flicker)
+        move_cursor 1 1
         draw_header 60
         draw_storage_overview
         draw_category_table_simple 60
@@ -950,9 +969,12 @@ run_tui() {
                 delete)
                     # Delete selected items
                     tui_delete_selected_items
+                    tui_cache_disk_stats
+                    clear_screen
                     ;;
                 refresh)
                     local expanded_cat="$TUI_EXPANDED_CAT"
+                    tui_cache_disk_stats
                     tui_refresh_with_spinner "Refreshing..."
                     if [[ -n "$expanded_cat" ]]; then
                         tui_load_category_items "$expanded_cat"
@@ -960,6 +982,7 @@ run_tui() {
                         TUI_ITEM_CURSOR=0
                         TUI_SCROLL_OFFSET=0
                     fi
+                    clear_screen
                     ;;
             esac
         else
@@ -985,7 +1008,9 @@ run_tui() {
                     fi
                     ;;
                 refresh)
+                    tui_cache_disk_stats
                     tui_refresh_with_spinner "Refreshing..."
+                    clear_screen
                     ;;
                 enter|right)
                     # Expand the currently highlighted category if expandable
@@ -1035,6 +1060,7 @@ run_tui() {
                         echo ""
                         echo "${YELLOW}No categories selected. Use [space] or [a] to select.${RESET}"
                         sleep 1.5
+                        clear_screen
                         continue
                     fi
 
@@ -1056,8 +1082,10 @@ run_tui() {
                         echo ""
                         echo "Press any key to continue..."
                         read -rsn1
+                        tui_cache_disk_stats
                         tui_refresh_data
                     fi
+                    clear_screen
                     ;;
                 [1-5])
                     # Toggle specific category selection and move cursor there
